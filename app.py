@@ -3,17 +3,20 @@ import pandas as pd
 import json
 import io
 import re
+import os
 import gspread
 from google.oauth2.service_account import Credentials
 
 # -------------------------------------------------------------------------
-# [웹프로그래밍 전문가] 1. 환경 설정 및 DB 연결 (기존과 동일)
+# [웹프로그래밍 전문가] 1. 시스템 설정 및 리소스 연결
 # -------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="사방넷 솔루션 v3.2 (Direct Input)")
+st.set_page_config(layout="wide", page_title="사방넷 솔루션 v4.0 (Pro)")
+
+# 내장 템플릿 파일명 정의
+MASTER_TEMPLATE_PATH = "master_template.xlsx"
 
 @st.cache_resource
 def get_db_connection():
-    # ... (기존 DB 연결 코드 유지) ...
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     try:
         credentials_info = st.secrets["gcp_service_account"]
@@ -23,11 +26,10 @@ def get_db_connection():
         sheet = client.open_by_url(sheet_url)
         return sheet.sheet1
     except Exception as e:
-        st.error(f"DB 연결 실패: {e}")
+        st.error(f"⚠️ DB 연결 실패: {e}")
         return None
 
 def load_mappings_from_db(worksheet):
-    # ... (기존 로드 함수 유지) ...
     if worksheet is None: return {}
     try:
         data = worksheet.get_all_records()
@@ -42,7 +44,6 @@ def load_mappings_from_db(worksheet):
     except Exception: return {}
 
 def save_mapping_to_db(worksheet, vendor, mapping_data):
-    # ... (기존 저장 함수 유지) ...
     if worksheet is None: return False
     try:
         cell = worksheet.find(vendor)
@@ -56,26 +57,95 @@ def normalize_header(header):
     header = re.sub(r'\[.*?\]', '', str(header))
     return re.sub(r'[^가-힣a-zA-Z0-9]', '', header).lower()
 
+# [개선사항 1] 숫자 컬럼 세정 함수 (쉼표, 원 제거)
+def clean_numeric_value(val):
+    if pd.isna(val) or val == "": return ""
+    s_val = str(val)
+    # 숫자와 점(.)을 제외한 모든 문자 제거 (예: "10,000원" -> "10000")
+    clean_str = re.sub(r'[^0-9.]', '', s_val)
+    try:
+        return float(clean_str) if '.' in clean_str else int(clean_str)
+    except:
+        return val # 변환 실패 시 원본 유지
+
 # -------------------------------------------------------------------------
-# [웹프로그래밍 전문가] 2. 메인 로직 (직접입력 UI 추가됨)
+# [웹프로그래밍 전문가] 2. 사이드바 및 초기 설정 (거래처 선택)
 # -------------------------------------------------------------------------
-st.title("☁️ 사방넷 대량등록 솔루션 v3.2 (직접입력 기능)")
+st.title("🚀 사방넷 대량등록 솔루션 v4.0 (Pro)")
 
 worksheet = get_db_connection()
 if not worksheet: st.stop()
 
+# DB에서 매핑 정보 로드
+mappings_db = load_mappings_from_db(worksheet)
+vendor_list = list(mappings_db.keys())
+
+# 사이드바: 거래처 선택 및 관리
+with st.sidebar:
+    st.header("🏢 거래처 설정")
+    
+    # 거래처 선택 로직
+    select_options = ["(신규 업체 등록)"] + vendor_list
+    selected_vendor = st.selectbox("작업할 거래처를 선택하세요", select_options)
+    
+    final_vendor_name = ""
+    saved_mapping = {}
+
+    if selected_vendor == "(신규 업체 등록)":
+        new_vendor_name = st.text_input("새 거래처명 입력", placeholder="예: 나이키 시즌2")
+        final_vendor_name = new_vendor_name
+        st.info("💡 신규 업체의 매핑 규칙을 새로 설정합니다.")
+    else:
+        final_vendor_name = selected_vendor
+        saved_mapping = mappings_db.get(final_vendor_name, {})
+        st.success(f"✅ '{final_vendor_name}' 설정을 불러왔습니다.")
+
+    st.divider()
+    
+    # [개선사항 2] 템플릿 관리 기능 (Admin)
+    with st.expander("🛠️ 양식 파일 관리 (Admin)"):
+        st.write("기본 양식(master_template.xlsx) 업데이트")
+        new_template = st.file_uploader("새 양식 파일", type=['xlsx', 'csv'])
+        if new_template and st.button("양식 덮어쓰기"):
+            with open(MASTER_TEMPLATE_PATH, "wb") as f:
+                f.write(new_template.getbuffer())
+            st.success("양식이 업데이트 되었습니다! (재시작 필요)")
+
+# -------------------------------------------------------------------------
+# [웹프로그래밍 전문가] 3. 메인 UI 및 로직
+# -------------------------------------------------------------------------
 col1, col2 = st.columns([1, 2])
 
-with col1:
-    st.subheader("1. 파일 업로드")
-    file_01 = st.file_uploader("01. 양식 파일 (Target)", type=['csv', 'xlsx'])
-    file_02 = st.file_uploader("02. 데이터 파일 (Source)", type=['csv', 'xlsx'])
+df_target = None
+df_source = None
 
-if file_01 and file_02:
+# 3-1. 양식 파일 로드 (자동)
+with col1:
+    st.subheader("1. 기준 양식 (Template)")
+    
+    # 로컬에 파일이 있는지 확인
+    if os.path.exists(MASTER_TEMPLATE_PATH):
+        st.info(f"📄 내장된 양식 사용 중: {MASTER_TEMPLATE_PATH}")
+        try:
+            df_target = pd.read_excel(MASTER_TEMPLATE_PATH)
+        except Exception as e:
+            st.error(f"양식 파일 오류: {e}")
+    else:
+        st.warning("⚠️ 내장 양식 파일이 없습니다. 업로드해주세요.")
+        uploaded_template = st.file_uploader("양식 파일 업로드", type=['csv', 'xlsx'])
+        if uploaded_template:
+            if uploaded_template.name.endswith('.csv'):
+                df_target = pd.read_csv(uploaded_template, encoding='cp949')
+            else:
+                df_target = pd.read_excel(uploaded_template)
+
+    st.subheader("2. 신상품 데이터 (Source)")
+    file_02 = st.file_uploader("매입처 파일 업로드", type=['csv', 'xlsx'])
+
+# 3-2. 매핑 및 변환 로직
+if df_target is not None and file_02 is not None:
     try:
-        # 파일 읽기
-        if file_01.name.endswith('.csv'): df_target = pd.read_csv(file_01, encoding='cp949')
-        else: df_target = pd.read_excel(file_01)
+        # 소스 파일 읽기
         if file_02.name.endswith('.csv'): df_source = pd.read_csv(file_02, encoding='cp949')
         else: df_source = pd.read_excel(file_02)
 
@@ -83,49 +153,38 @@ if file_01 and file_02:
         source_columns = df_source.columns.tolist()
 
         with col2:
-            st.subheader("2. 스마트 매핑 & 직접 입력")
-            supplier_name = st.text_input("거래처명 (저장 Key)", placeholder="예: 나이키")
+            st.subheader(f"3. 매핑 설정: {final_vendor_name}")
             
-            mappings_db = load_mappings_from_db(worksheet)
-            saved_mapping = mappings_db.get(supplier_name, {})
-            
-            if supplier_name and supplier_name in mappings_db:
-                st.success(f"📂 설정을 불러왔습니다: '{supplier_name}'")
+            if not final_vendor_name:
+                st.warning("👈 왼쪽 사이드바에서 거래처명을 먼저 입력해주세요.")
+                st.stop()
 
-            st.markdown("---")
-            
             user_selections = {}
             
-            # [UI 개선] 스크롤 컨테이너
             with st.container(height=600):
                 for target_col in target_columns:
                     c1, c2, c3 = st.columns([2, 2, 0.5])
                     
-                    # 1. 라벨 (필수 표시)
                     with c1:
                         display_text = target_col.replace("\n", " ")
-                        if "[필수]" in display_text:
-                            st.markdown(f"**🔴 {display_text}**")
-                        else:
-                            st.text(display_text)
+                        if "[필수]" in display_text: st.markdown(f"**🔴 {display_text}**")
+                        else: st.text(display_text)
                     
-                    # 2. 기본값 결정 로직
-                    default_idx = 0     # 0: (매핑 안함)
-                    saved_val = saved_mapping.get(target_col)
+                    # 매핑 기본값 로직
+                    default_idx = 0
+                    direct_input_val = ""
                     match_type = ""
-                    direct_input_val = "" # 직접입력 시 복원할 값
-
-                    # Case A: 저장된 값이 있을 때
+                    
+                    saved_val = saved_mapping.get(target_col)
+                    
                     if saved_val:
-                        if saved_val.startswith("FIXED::"): # 직접입력값인 경우
-                            default_idx = 1 # 1: (직접입력)
+                        if saved_val.startswith("FIXED::"):
+                            default_idx = 1
                             direct_input_val = saved_val.replace("FIXED::", "")
                             match_type = "✏️"
-                        elif saved_val in source_columns: # 컬럼 매핑인 경우
-                            default_idx = source_columns.index(saved_val) + 2 # +2: 매핑안함, 직접입력 다음
+                        elif saved_val in source_columns:
+                            default_idx = source_columns.index(saved_val) + 2
                             match_type = "💾"
-                    
-                    # Case B: 저장된 값이 없고 스마트 매핑 시도
                     else:
                         target_clean = normalize_header(target_col)
                         for idx, src_col in enumerate(source_columns):
@@ -135,101 +194,71 @@ if file_01 and file_02:
                                 match_type = "🤖"
                                 break
                     
-                    # 3. 셀렉트박스 & 입력창 렌더링
                     with c2:
-                        # 옵션 리스트: [매핑 안함, 직접입력, ...소스컬럼들...]
                         options = ["(매핑 안함)", "(직접입력)"] + source_columns
+                        selected = st.selectbox(f"sel_{target_col}", options, index=default_idx, key=f"sb_{target_col}", label_visibility="collapsed")
                         
-                        selected_option = st.selectbox(
-                            f"Sel_{target_col}", options, 
-                            index=default_idx, 
-                            key=f"sb_{target_col}", 
-                            label_visibility="collapsed"
-                        )
+                        final_val = None
+                        if selected == "(직접입력)":
+                            inp = st.text_input("값", value=direct_input_val, key=f"txt_{target_col}", label_visibility="collapsed")
+                            final_val = f"FIXED::{inp}"
+                        elif selected != "(매핑 안함)":
+                            final_val = selected
                         
-                        final_value = None
-                        
-                        # (직접입력) 선택 시 텍스트 입력창 표시
-                        if selected_option == "(직접입력)":
-                            user_input = st.text_input(
-                                "값 입력", 
-                                value=direct_input_val, 
-                                key=f"txt_{target_col}",
-                                label_visibility="collapsed",
-                                placeholder="고정값 입력"
-                            )
-                            # 내부 저장용 포맷: FIXED::값
-                            final_value = f"FIXED::{user_input}"
-                        elif selected_option != "(매핑 안함)":
-                            final_value = selected_option
-                        
-                        # 결과 딕셔너리에 저장 (매핑 안함 제외)
-                        if final_value:
-                            user_selections[target_col] = final_value
+                        if final_val: user_selections[target_col] = final_val
 
                     with c3:
                         if match_type: st.text(match_type)
 
-            if st.button("설정 저장 (Cloud DB)"):
-                if not supplier_name:
-                    st.error("거래처명을 입력해주세요.")
-                else:
-                    with st.spinner("저장 중..."):
-                        if save_mapping_to_db(worksheet, supplier_name, user_selections):
-                            st.toast("저장 완료!", icon="✅")
-                            st.cache_resource.clear()
-                        else: st.error("저장 실패")
+            if st.button("현재 매핑 저장 (Cloud DB)"):
+                with st.spinner("저장 중..."):
+                    if save_mapping_to_db(worksheet, final_vendor_name, user_selections):
+                        st.toast(f"'{final_vendor_name}' 설정 저장 완료!", icon="✅")
+                        st.cache_resource.clear()
+                    else: st.error("저장 실패")
 
-        # ---------------------------------------------------------------------
-        # [웹프로그래밍 전문가] 3. 데이터 변환 엔진 (FIXED 처리 추가)
-        # ---------------------------------------------------------------------
         st.divider()
-        st.subheader("3. 결과 생성")
-
+        st.subheader("4. 최종 변환 및 다운로드")
+        
         if st.button("데이터 변환 실행"):
-            with st.spinner('데이터 생성 중...'):
+            with st.spinner('데이터 처리 및 클리닝 중...'):
                 result_df = pd.DataFrame(columns=target_columns)
-                
-                # [핵심] 매핑 적용 로직
-                # 소스 데이터의 행 수만큼 빈 DataFrame 준비 (안전한 방식)
                 row_count = len(df_source)
-                
-                # 미리 행을 확보하지 않으면 단일값 할당 시 에러 가능성 있으므로
-                # 우선 소스 데이터프레임의 인덱스를 기준으로 병합
                 
                 for target_col, map_val in user_selections.items():
                     if map_val.startswith("FIXED::"):
-                        # 고정값 처리: 모든 행에 동일한 값 할당
-                        fixed_value = map_val.replace("FIXED::", "")
-                        result_df[target_col] = [fixed_value] * row_count
+                        # 고정값 할당
+                        val = map_val.replace("FIXED::", "")
+                        result_df[target_col] = [val] * row_count
                     else:
-                        # 컬럼 매핑 처리
-                        result_df[target_col] = df_source[map_val]
+                        # 데이터 매핑 및 [개선사항 1] 숫자 클리닝 적용
+                        raw_data = df_source[map_val]
+                        
+                        # 가격 관련 컬럼인 경우 자동 정제
+                        if any(keyword in target_col for keyword in ["판매가", "원가", "가격", "TAG가"]):
+                            result_df[target_col] = raw_data.apply(clean_numeric_value)
+                        else:
+                            result_df[target_col] = raw_data
                 
-                # 매핑되지 않은 나머지 컬럼은 NaN -> 빈 문자열 처리
                 result_df = result_df.fillna("")
                 
-                # Validation (필수값 체크)
+                # Validation
                 errs = []
                 for col in target_columns:
                     if "[필수]" in col:
-                        # 빈 문자열("") 이거나 NaN인 경우 체크
-                        empty_mask = (result_df[col] == "") | (result_df[col].isna())
-                        if empty_mask.sum() > 0:
-                            errs.append(f"⚠️ **{col}**: {empty_mask.sum()}건 누락")
+                        empty_check = (result_df[col] == "") | (result_df[col].isna())
+                        if empty_check.sum() > 0: errs.append(f"⚠️ **{col}**: {empty_check.sum()}건 누락")
                 
                 if errs:
-                    st.error(f"필수값 누락 {len(errs)}건 발견!")
+                    st.error(f"필수값 오류 {len(errs)}건")
                     for e in errs: st.write(e)
                 else:
                     st.success("✅ 무결성 검증 통과!")
 
-                # 엑셀 다운로드
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     result_df.to_excel(writer, index=False)
                     ws = writer.sheets['Sheet1']
-                    # 컬럼 너비 조정
                     for i, col in enumerate(result_df.columns):
                         col_str = str(col)
                         try: max_len = result_df[col].astype(str).map(len).max()
@@ -237,8 +266,8 @@ if file_01 and file_02:
                         ws.set_column(i, i, min(max(len(col_str), max_len) + 2, 40))
                         
                 output.seek(0)
-                file_prefix = supplier_name if supplier_name else "사방넷_변환완료"
-                st.download_button("📥 결과 파일 다운로드", output, f"{file_prefix}.xlsx")
+                file_name = f"{final_vendor_name}_사방넷등록_{len(result_df)}건.xlsx"
+                st.download_button("📥 결과 파일 다운로드", output, file_name)
 
     except Exception as e:
-        st.error(f"시스템 오류: {e}")
+        st.error(f"처리 중 오류 발생: {e}")
