@@ -9,33 +9,27 @@ from google.oauth2.service_account import Credentials
 # -------------------------------------------------------------------------
 # [웹프로그래밍 전문가] 1. 환경 설정 및 DB 연결
 # -------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="사방넷 솔루션 v3.0 (Cloud DB)")
+st.set_page_config(layout="wide", page_title="사방넷 솔루션 v3.1 (Fixed)")
 
-# Google Sheets 연결 함수 (캐싱을 통해 속도 최적화)
+# Google Sheets 연결 함수
 @st.cache_resource
 def get_db_connection():
-    # Streamlit Secrets에서 인증 정보 로드
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    
-    # st.secrets가 있는 경우(배포/로컬 설정)와 없는 경우 예외처리
     try:
         credentials_info = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(credentials_info, scopes=scope)
         client = gspread.authorize(creds)
-        
-        # 시트 열기 (Secrets에 저장된 시트 URL 또는 ID 사용)
         sheet_url = st.secrets["private_sheet_url"] 
         sheet = client.open_by_url(sheet_url)
-        return sheet.sheet1  # 첫 번째 시트 사용
+        return sheet.sheet1
     except Exception as e:
         st.error(f"DB 연결 실패: secrets 설정을 확인해주세요. ({e})")
         return None
 
-# 매핑 데이터 로드 (Google Sheets -> Dict)
+# 매핑 데이터 로드
 def load_mappings_from_db(worksheet):
     if worksheet is None: return {}
     try:
-        # 모든 레코드 가져오기 (Expected columns: 'Vendor', 'MappingData')
         data = worksheet.get_all_records()
         mapping_dict = {}
         for row in data:
@@ -48,48 +42,38 @@ def load_mappings_from_db(worksheet):
                     continue
         return mapping_dict
     except Exception:
-        # 시트가 비어있거나 컬럼이 없는 초기 상태 처리
         if worksheet.row_count == 0 or not worksheet.get_values():
-            worksheet.append_row(['Vendor', 'MappingData']) # 헤더 생성
+            worksheet.append_row(['Vendor', 'MappingData'])
         return {}
 
-# 매핑 데이터 저장 (Dict -> Google Sheets Upsert)
+# 매핑 데이터 저장
 def save_mapping_to_db(worksheet, vendor, mapping_data):
     if worksheet is None: return False
     try:
-        # 기존 데이터 확인
         cell = worksheet.find(vendor)
         json_str = json.dumps(mapping_data, ensure_ascii=False)
-        
         if cell:
-            # 이미 존재하면 Update (Vendor 옆 칸인 B열 업데이트)
             worksheet.update_cell(cell.row, 2, json_str)
         else:
-            # 없으면 Insert
             worksheet.append_row([vendor, json_str])
         return True
     except Exception as e:
         st.error(f"저장 중 오류 발생: {e}")
         return False
 
-# 정규화 함수 (스마트 매핑용)
+# 정규화 함수
 def normalize_header(header):
     header = re.sub(r'\[.*?\]', '', str(header))
     return re.sub(r'[^가-힣a-zA-Z0-9]', '', header).lower()
 
 # -------------------------------------------------------------------------
-# [웹프로그래밍 전문가] 2. 메인 로직 시작
+# [웹프로그래밍 전문가] 2. 메인 로직
 # -------------------------------------------------------------------------
-st.title("☁️ 사방넷 대량등록 솔루션 v3.0 (Google DB 연동)")
-st.markdown("""
-> **System Info**: 매핑 규칙이 **Google Sheets**에 안전하게 저장됩니다.
-> 동료들과 실시간으로 매핑 정보를 공유할 수 있습니다.
-""")
+st.title("☁️ 사방넷 대량등록 솔루션 v3.1 (Google DB)")
 
-# DB 연결 시도
 worksheet = get_db_connection()
 if not worksheet:
-    st.stop() # DB 연결 안되면 중단
+    st.stop()
 
 col1, col2 = st.columns([1, 2])
 
@@ -98,7 +82,9 @@ with col1:
     file_01 = st.file_uploader("01. 양식 파일 (Target)", type=['csv', 'xlsx'])
     file_02 = st.file_uploader("02. 데이터 파일 (Source)", type=['csv', 'xlsx'])
 
+# 파일이 업로드되었을 때만 실행
 if file_01 and file_02:
+    # >>> try 블록 시작 <<<
     try:
         # 파일 읽기
         if file_01.name.endswith('.csv'): df_target = pd.read_csv(file_01, encoding='cp949')
@@ -114,12 +100,11 @@ if file_01 and file_02:
             st.subheader("2. 스마트 컬럼 매핑 (DB Synced)")
             supplier_name = st.text_input("거래처명 (저장 Key)", placeholder="예: 나이키")
             
-            # DB에서 매핑 정보 로드
             mappings_db = load_mappings_from_db(worksheet)
             saved_mapping = mappings_db.get(supplier_name, {})
             
             if supplier_name and supplier_name in mappings_db:
-                st.success(f"📂 Cloud DB: '{supplier_name}' 매핑 불러오기 성공!")
+                st.success(f"📂 Cloud DB: '{supplier_name}' 매핑 로드됨")
 
             st.markdown("---")
             
@@ -137,11 +122,9 @@ if file_01 and file_02:
                     default_idx = 0
                     match_type = ""
                     
-                    # 1. DB 저장값 확인
                     if saved_mapping.get(target_col) in source_columns:
                         default_idx = source_columns.index(saved_mapping[target_col]) + 1
                         match_type = "💾"
-                    # 2. 스마트 매핑
                     else:
                         target_clean = normalize_header(target_col)
                         for idx, src_col in enumerate(source_columns):
@@ -165,45 +148,57 @@ if file_01 and file_02:
                 if not supplier_name:
                     st.error("거래처명을 입력해주세요.")
                 else:
-                    with st.spinner("Google Sheets에 저장 중..."):
+                    with st.spinner("저장 중..."):
                         if save_mapping_to_db(worksheet, supplier_name, user_selections):
-                            st.toast(f"✅ '{supplier_name}' 저장 완료!", icon="☁️")
-                            st.cache_resource.clear() # 캐시 갱신 (선택사항)
+                            st.toast("저장 완료!", icon="✅")
+                            st.cache_resource.clear()
                         else:
                             st.error("저장 실패")
 
-    # 변환 및 다운로드 로직 (이전과 동일하여 핵심만 유지)
-    st.divider()
-    if st.button("데이터 변환 및 검증 실행"):
-        with st.spinner('처리 중...'):
-            result_df = pd.DataFrame(columns=target_columns)
-            for t_col, s_col in user_selections.items():
-                result_df[t_col] = df_source[s_col]
-            result_df = result_df.fillna("")
-            
-            # Validation
-            errs = []
-            for col in target_columns:
-                if "[필수]" in col:
-                    empty_cnt = (result_df[col] == "").sum() + result_df[col].isna().sum()
-                    if empty_cnt > 0: errs.append(f"⚠️ **{col}**: {empty_cnt}건 누락")
-            
-            if errs:
-                st.error("필수값 누락 발견!")
-                for e in errs: st.write(e)
-            else:
-                st.success("무결성 검증 통과!")
+        # ---------------------------------------------------------------------
+        # [수정된 부분] 여기서부터 들여쓰기를 맞춰 try 블록 안에 포함시킴
+        # ---------------------------------------------------------------------
+        st.divider()
+        st.subheader("3. 결과 생성")
 
-            # Excel Output
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                result_df.to_excel(writer, index=False)
-                ws = writer.sheets['Sheet1']
-                for i, col in enumerate(result_df.columns):
-                    ws.set_column(i, i, 20) # 간략화된 너비 조정
-            output.seek(0)
-            
-            st.download_button("📥 결과 파일 다운로드", output, f"{supplier_name}_완료.xlsx")
+        if st.button("데이터 변환 및 검증 실행"):
+            with st.spinner('처리 중...'):
+                result_df = pd.DataFrame(columns=target_columns)
+                for t_col, s_col in user_selections.items():
+                    result_df[t_col] = df_source[s_col]
+                result_df = result_df.fillna("")
+                
+                # Validation
+                errs = []
+                for col in target_columns:
+                    if "[필수]" in col:
+                        empty_cnt = (result_df[col] == "").sum() + result_df[col].isna().sum()
+                        if empty_cnt > 0: errs.append(f"⚠️ **{col}**: {empty_cnt}건 누락")
+                
+                if errs:
+                    st.error("필수값 누락 발견!")
+                    for e in errs: st.write(e)
+                else:
+                    st.success("무결성 검증 통과!")
 
-except Exception as e:
-    st.error(f"오류: {e}")
+                # Excel Output
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    result_df.to_excel(writer, index=False)
+                    ws = writer.sheets['Sheet1']
+                    for i, col in enumerate(result_df.columns):
+                        # 컬럼 너비 조정 (간소화)
+                        col_str = str(col)
+                        try:
+                            max_len = result_df[col].astype(str).map(len).max()
+                            if pd.isna(max_len): max_len = 0
+                        except: max_len = 0
+                        ws.set_column(i, i, min(max(len(col_str), max_len) + 2, 40))
+                        
+                output.seek(0)
+                file_prefix = supplier_name if supplier_name else "변환완료"
+                st.download_button("📥 결과 파일 다운로드", output, f"{file_prefix}.xlsx")
+
+    # >>> try 블록 종료, except 블록 연결 <<<
+    except Exception as e:
+        st.error(f"시스템 처리 중 오류 발생: {e}")
