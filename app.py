@@ -11,7 +11,7 @@ import time
 # -------------------------------------------------------------------------
 # [웹프로그래밍 전문가] 1. 시스템 설정 및 리소스 연결
 # -------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="사방넷 솔루션 v5.1 (Fixed)")
+st.set_page_config(layout="wide", page_title="사방넷 솔루션 v5.2 (Sync Fix)")
 MASTER_TEMPLATE_PATH = "master_template.xlsx"
 
 @st.cache_resource
@@ -64,29 +64,47 @@ def clean_numeric_value(val):
     except: return val
 
 # -------------------------------------------------------------------------
-# [웹프로그래밍 전문가] 2. 사이드바 및 초기 설정
+# [웹프로그래밍 전문가] 2. 사이드바 및 초기 설정 (상태 동기화 로직 적용)
 # -------------------------------------------------------------------------
-st.title("💎Gaul 사방넷 대량등록 솔루션 v5.1")
+st.title("💎 사방넷 대량등록 솔루션 v5.2 (목록 동기화)")
 
 worksheet = get_db_connection()
 if not worksheet: st.stop()
 
-# DB 데이터 로드 (스크립트 실행 시마다 최신화)
+# [핵심 변경 1] 세션 스테이트 초기화 및 DB 로드
+# 매번 DB를 긁어오되, 세션에 저장된 값이 있으면 우선순위를 고려함
+if "vendor_list" not in st.session_state:
+    st.session_state.vendor_list = []
+
+# DB에서 실제 데이터 로드
 mappings_db = load_mappings_from_db(worksheet)
-vendor_list = list(mappings_db.keys())
+db_vendor_list = list(mappings_db.keys())
+
+# DB 목록이 업데이트 되었다면 세션에도 반영 (동기화)
+# 단, 방금 추가한 신규 업체가 DB 로드 시점 차이로 없을 수도 있으므로 합집합 처리
+current_set = set(st.session_state.vendor_list)
+db_set = set(db_vendor_list)
+merged_list = sorted(list(current_set | db_set)) # 병합 후 정렬
+
+st.session_state.vendor_list = merged_list
 
 with st.sidebar:
     st.header("🏢 거래처 설정")
-    select_options = ["(신규 업체 등록)"] + vendor_list
+    select_options = ["(신규 업체 등록)"] + st.session_state.vendor_list
     
-    # Session State를 활용하여 선택값 유지
+    # 선택 인덱스 관리
     if "selected_vendor_idx" not in st.session_state:
         st.session_state.selected_vendor_idx = 0
         
+    # 인덱스 범위 초과 방지 (목록이 변했을 때 에러 방지)
+    if st.session_state.selected_vendor_idx >= len(select_options):
+        st.session_state.selected_vendor_idx = 0
+
     selected_vendor = st.selectbox(
         "작업할 거래처를 선택하세요", 
         select_options,
-        index=st.session_state.get("selected_vendor_idx", 0)
+        index=st.session_state.selected_vendor_idx,
+        key="vendor_selector" 
     )
     
     final_vendor_name = ""
@@ -232,13 +250,28 @@ if df_target is not None and file_02 is not None:
                             "fmt": final_fmt_val
                         }
 
-            # [수정됨] 저장 버튼 로직: 저장 후 Rerun 추가
+            # [핵심 변경 2] 저장 버튼 로직: 세션 상태 강제 업데이트
             if st.button("설정 저장 (Cloud DB)"):
                 with st.spinner("저장 및 동기화 중..."):
                     if save_mapping_to_db(worksheet, final_vendor_name, user_selections):
-                        st.toast(f"✅ '{final_vendor_name}' 저장 완료! 목록을 갱신합니다.", icon="🔄")
-                        time.sleep(1.5) # 사용자가 메시지를 볼 수 있게 잠시 대기
-                        st.rerun()      # [핵심 Fix] 스크립트 재실행 -> 목록 자동 갱신
+                        # 1. DB 저장은 성공함
+                        # 2. 내 화면의 목록(Session State)에도 강제 추가
+                        if final_vendor_name not in st.session_state.vendor_list:
+                            st.session_state.vendor_list.append(final_vendor_name)
+                            st.session_state.vendor_list.sort()
+                        
+                        # 3. 사이드바 셀렉트박스가 방금 저장한 업체를 가리키도록 인덱스 조정
+                        # 목록(select_options)은 ["(신규 업체 등록)"] + vendor_list 구조임
+                        # 따라서 인덱스는 vendor_list에서의 위치 + 1
+                        new_idx = st.session_state.vendor_list.index(final_vendor_name) + 1
+                        st.session_state.selected_vendor_idx = new_idx
+                        
+                        st.toast(f"✅ '{final_vendor_name}' 저장 완료! 즉시 반영됩니다.", icon="⚡")
+                        time.sleep(1) 
+                        
+                        # 4. 캐시 클리어 후 리런 (DB 데이터도 갱신 유도)
+                        st.cache_resource.clear()
+                        st.rerun()
                     else: 
                         st.error("저장 실패")
 
