@@ -6,11 +6,12 @@ import re
 import os
 import gspread
 from google.oauth2.service_account import Credentials
+import time
 
 # -------------------------------------------------------------------------
 # [웹프로그래밍 전문가] 1. 시스템 설정 및 리소스 연결
 # -------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="사방넷 솔루션 v5.0 (Format Master)")
+st.set_page_config(layout="wide", page_title="사방넷 솔루션 v5.1 (Fixed)")
 MASTER_TEMPLATE_PATH = "master_template.xlsx"
 
 @st.cache_resource
@@ -65,18 +66,28 @@ def clean_numeric_value(val):
 # -------------------------------------------------------------------------
 # [웹프로그래밍 전문가] 2. 사이드바 및 초기 설정
 # -------------------------------------------------------------------------
-st.title("💎 사방넷 대량등록 솔루션 v5.0 (서식 제어)")
+st.title("💎 사방넷 대량등록 솔루션 v5.1 (목록 자동갱신)")
 
 worksheet = get_db_connection()
 if not worksheet: st.stop()
 
+# DB 데이터 로드 (스크립트 실행 시마다 최신화)
 mappings_db = load_mappings_from_db(worksheet)
 vendor_list = list(mappings_db.keys())
 
 with st.sidebar:
     st.header("🏢 거래처 설정")
     select_options = ["(신규 업체 등록)"] + vendor_list
-    selected_vendor = st.selectbox("작업할 거래처를 선택하세요", select_options)
+    
+    # Session State를 활용하여 선택값 유지
+    if "selected_vendor_idx" not in st.session_state:
+        st.session_state.selected_vendor_idx = 0
+        
+    selected_vendor = st.selectbox(
+        "작업할 거래처를 선택하세요", 
+        select_options,
+        index=st.session_state.get("selected_vendor_idx", 0)
+    )
     
     final_vendor_name = ""
     saved_mapping = {}
@@ -96,7 +107,9 @@ with st.sidebar:
         if new_template and st.button("양식 덮어쓰기"):
             with open(MASTER_TEMPLATE_PATH, "wb") as f:
                 f.write(new_template.getbuffer())
-            st.success("양식이 업데이트 되었습니다! (재시작 필요)")
+            st.success("양식이 업데이트 되었습니다! (자동 리로드)")
+            time.sleep(1)
+            st.rerun()
 
 # -------------------------------------------------------------------------
 # [웹프로그래밍 전문가] 3. 메인 UI 및 로직
@@ -122,7 +135,6 @@ with col1:
 # 3-2. 매핑 및 서식 설정 로직
 if df_target is not None and file_02 is not None:
     try:
-        # 데이터 읽을 때부터 모든 데이터를 문자열(dtype=str)로 읽어서 '001' 유지 (1차 방어)
         if file_02.name.endswith('.csv'): 
             df_source = pd.read_csv(file_02, encoding='cp949', dtype=str)
         else: 
@@ -137,48 +149,41 @@ if df_target is not None and file_02 is not None:
                 st.warning("👈 사이드바에서 거래처를 선택하세요.")
                 st.stop()
 
-            user_selections = {} # 최종 저장될 딕셔너리
+            user_selections = {} 
             
-            # 레이아웃 헤더
+            # 헤더
             h1, h2, h3, h4 = st.columns([2, 2, 1.2, 0.5])
             h1.markdown("**사방넷 항목**")
             h2.markdown("**매핑 소스 / 값**")
-            h3.markdown("**표시 형식**") # New Feature
+            h3.markdown("**표시 형식**")
             
             with st.container(height=600):
                 for target_col in target_columns:
                     c1, c2, c3, c4 = st.columns([2, 2, 1.2, 0.5])
                     
-                    # 1. 항목명 표시
                     with c1:
                         display_text = target_col.replace("\n", " ")
                         if "[필수]" in display_text: st.markdown(f"**🔴 {display_text}**")
                         else: st.text(display_text)
                     
-                    # 2. 저장된 설정 복원 (v5.0 호환성 처리)
-                    # 저장된 데이터 구조: {"val": "...", "fmt": "..."}
-                    # 구버전 데이터 구조: "..." (문자열)
-                    
+                    # 값 복원 로직
                     saved_entry = saved_mapping.get(target_col)
                     
                     default_idx = 0
                     direct_input_val = ""
                     match_type = ""
-                    default_fmt_idx = 0 # 0: 일반, 1: 텍스트, 2: 숫자
+                    default_fmt_idx = 0 
                     
                     current_val_str = ""
                     current_fmt_str = "General"
 
-                    # (A) 저장된 값이 있는 경우
                     if saved_entry:
-                        # 신버전(Dict)인지 구버전(Str)인지 확인
                         if isinstance(saved_entry, dict):
                             current_val_str = saved_entry.get("val", "")
                             current_fmt_str = saved_entry.get("fmt", "General")
                         else:
-                            current_val_str = saved_entry # 구버전 호환
+                            current_val_str = saved_entry 
                         
-                        # 값 복원 로직
                         if current_val_str.startswith("FIXED::"):
                             default_idx = 1
                             direct_input_val = current_val_str.replace("FIXED::", "")
@@ -187,11 +192,8 @@ if df_target is not None and file_02 is not None:
                             default_idx = source_columns.index(current_val_str) + 2
                             match_type = "💾"
                         
-                        # 서식 복원 로직
-                        if current_fmt_str == "@": default_fmt_idx = 1 # 텍스트
-                        elif current_fmt_str == "#,##0": default_fmt_idx = 2 # 숫자
-                    
-                    # (B) 저장된 값이 없으면 스마트 매핑
+                        if current_fmt_str == "@": default_fmt_idx = 1
+                        elif current_fmt_str == "#,##0": default_fmt_idx = 2
                     else:
                         target_clean = normalize_header(target_col)
                         for idx, src_col in enumerate(source_columns):
@@ -201,7 +203,6 @@ if df_target is not None and file_02 is not None:
                                 match_type = "🤖"
                                 break
                     
-                    # 3. 매핑 선택 (Selectbox)
                     final_map_val = None
                     with c2:
                         options = ["(매핑 안함)", "(직접입력)"] + source_columns
@@ -213,10 +214,8 @@ if df_target is not None and file_02 is not None:
                         elif selected != "(매핑 안함)":
                             final_map_val = selected
                     
-                    # 4. [NEW] 표시 형식 선택 (Selectbox)
                     final_fmt_val = "General"
                     with c3:
-                        # 매핑이 선택된 경우에만 서식 활성화
                         if final_map_val:
                             fmt_options = ["일반", "텍스트(001유지)", "숫자(1,000)"]
                             fmt_selected = st.selectbox("fmt", fmt_options, index=default_fmt_idx, key=f"fmt_{target_col}", label_visibility="collapsed")
@@ -224,23 +223,24 @@ if df_target is not None and file_02 is not None:
                             if fmt_selected == "텍스트(001유지)": final_fmt_val = "@"
                             elif fmt_selected == "숫자(1,000)": final_fmt_val = "#,##0"
                     
-                    # 5. 상태 아이콘
                     with c4:
                         if match_type: st.text(match_type)
                     
-                    # 6. 최종 딕셔너리에 저장 (값 + 서식)
                     if final_map_val:
                         user_selections[target_col] = {
                             "val": final_map_val,
                             "fmt": final_fmt_val
                         }
 
+            # [수정됨] 저장 버튼 로직: 저장 후 Rerun 추가
             if st.button("설정 저장 (Cloud DB)"):
-                with st.spinner("저장 중..."):
+                with st.spinner("저장 및 동기화 중..."):
                     if save_mapping_to_db(worksheet, final_vendor_name, user_selections):
-                        st.toast(f"'{final_vendor_name}' 설정(서식 포함) 저장 완료!", icon="✅")
-                        st.cache_resource.clear()
-                    else: st.error("저장 실패")
+                        st.toast(f"✅ '{final_vendor_name}' 저장 완료! 목록을 갱신합니다.", icon="🔄")
+                        time.sleep(1.5) # 사용자가 메시지를 볼 수 있게 잠시 대기
+                        st.rerun()      # [핵심 Fix] 스크립트 재실행 -> 목록 자동 갱신
+                    else: 
+                        st.error("저장 실패")
 
         st.divider()
         st.subheader("4. 최종 변환 및 다운로드")
@@ -249,36 +249,27 @@ if df_target is not None and file_02 is not None:
             with st.spinner('서식 적용 및 변환 중...'):
                 result_df = pd.DataFrame(columns=target_columns)
                 row_count = len(df_source)
-                
-                # 서식 정보를 나중에 쓰기 위해 별도 저장
                 col_formats = {} 
                 
                 for target_col, setting in user_selections.items():
-                    # setting은 이제 dict입니다. {"val":..., "fmt":...}
                     map_val = setting["val"]
                     fmt_val = setting["fmt"]
-                    col_formats[target_col] = fmt_val # 서식 기억
+                    col_formats[target_col] = fmt_val
                     
-                    # 값 주입 로직
                     if map_val.startswith("FIXED::"):
                         val = map_val.replace("FIXED::", "")
                         result_df[target_col] = [val] * row_count
                     else:
                         raw_data = df_source[map_val]
-                        
-                        # 텍스트(@) 형식이면 -> 무조건 문자열로 변환하여 보존
                         if fmt_val == "@":
                             result_df[target_col] = raw_data.astype(str)
-                        # 숫자(#,##0) 형식이면 -> 클리닝 수행
                         elif fmt_val == "#,##0":
                              result_df[target_col] = raw_data.apply(clean_numeric_value)
-                        # 일반이면 -> 있는 그대로
                         else:
                             result_df[target_col] = raw_data
                 
                 result_df = result_df.fillna("")
                 
-                # Validation
                 errs = []
                 for col in target_columns:
                     if "[필수]" in col:
@@ -291,36 +282,27 @@ if df_target is not None and file_02 is not None:
                 else:
                     st.success("✅ 무결성 검증 통과!")
 
-                # -----------------------------------------------------------
-                # [Expert Touch] XlsxWriter 엔진을 이용한 정밀 서식 제어
-                # -----------------------------------------------------------
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     result_df.to_excel(writer, index=False, sheet_name='Sheet1')
                     workbook = writer.book
                     worksheet_xls = writer.sheets['Sheet1']
                     
-                    # 서식 객체 생성
-                    fmt_text = workbook.add_format({'num_format': '@'})     # 텍스트
-                    fmt_num = workbook.add_format({'num_format': '#,##0'})  # 숫자(천단위)
+                    fmt_text = workbook.add_format({'num_format': '@'})
+                    fmt_num = workbook.add_format({'num_format': '#,##0'})
                     
                     for i, col in enumerate(result_df.columns):
-                        # 1. 컬럼 너비 자동 조정
                         col_str = str(col)
                         try: max_len = result_df[col].astype(str).map(len).max()
                         except: max_len = 0
                         width = min(max(len(col_str), max_len) + 2, 50)
                         
-                        # 2. 사용자 지정 서식 적용
                         cell_format = None
                         user_fmt = col_formats.get(col, "General")
                         
-                        if user_fmt == "@":
-                            cell_format = fmt_text
-                        elif user_fmt == "#,##0":
-                            cell_format = fmt_num
+                        if user_fmt == "@": cell_format = fmt_text
+                        elif user_fmt == "#,##0": cell_format = fmt_num
                         
-                        # 너비와 서식을 동시에 적용
                         worksheet_xls.set_column(i, i, width, cell_format)
                         
                 output.seek(0)
